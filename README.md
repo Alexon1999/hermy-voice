@@ -137,6 +137,34 @@ python -c "import sounddevice as sd; print(sd.query_devices())"
 
 `Ctrl+C` arrête Hermy et ferme le micro. Le micro reste ouvert en continu pendant l’exécution ; sur macOS, son voyant reste allumé.
 
+## Créer les applications macOS
+
+Sur un Mac, crée d'abord l'environnement Python et installe les dépendances de build :
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-build-macos.txt
+./build_macos.sh
+```
+
+Le dossier `dist/` contient deux lanceurs construits depuis le même script :
+
+- `dist/macos/Hermy.app` : à ouvrir dans le Finder pour utiliser uniquement la mascotte GUI.
+- `dist/macos/HermyConsole/HermyConsole` : à lancer dans Terminal pour garder tous les messages console et arrêter avec `Ctrl+C`. Le lanceur console accepte aussi `--gui`.
+
+Au premier lancement, crée le fichier de configuration utilisateur depuis le modèle, puis renseigne ta clé API :
+
+```bash
+mkdir -p "$HOME/Library/Application Support/Hermy"
+cp .env.example "$HOME/Library/Application Support/Hermy/.env"
+```
+
+Édite ensuite `~/Library/Application Support/Hermy/.env`. Si ton projet a déjà un `.env` configuré, copie-le à la place du modèle pour conserver tes réglages. Ne distribue jamais ce fichier : il contient ta clé privée. L’application enregistrera aussi l’identifiant de conversation, la position de la mascotte et son journal dans ce dossier. Le modèle Whisper se télécharge lors de son premier lancement. macOS demandera l’autorisation d’utiliser le micro.
+
+Le script de build doit être lancé sur le Mac cible : PyInstaller construit pour le système et l’architecture de la machine qui exécute le build.
+
 ## Diagnostic
 
 - Si le RMS reste proche de `0.0000` quand tu parles, vérifie l’entrée choisie dans **Réglages Système → Son → Entrée** et les permissions micro.

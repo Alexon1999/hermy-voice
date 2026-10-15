@@ -26,7 +26,12 @@ from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 
 ROOT = Path(__file__).resolve().parent
-load_dotenv(ROOT / ".env")
+if getattr(sys, "frozen", False):
+    DATA_DIR = Path.home() / "Library" / "Application Support" / "Hermy"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+else:
+    DATA_DIR = ROOT
+load_dotenv(DATA_DIR / ".env")
 API_BASE = os.getenv(
     "HERMY_API_BASE", "https://hermes-api.ualexon.dev/p/hermy/v1").rstrip("/")
 API_KEY = os.getenv("API_SERVER_KEY", "").strip()
@@ -54,7 +59,7 @@ CLAP_MIN_INTERVAL = float(os.getenv("CLAP_MIN_INTERVAL", "0.22"))
 CLAP_PAIR_WINDOW = float(os.getenv("CLAP_PAIR_WINDOW", "0.85"))
 HERMY_DEBUG_AUDIO = os.getenv("HERMY_DEBUG_AUDIO", "1").strip(
 ).lower() in ("1", "true", "yes", "on")
-STATE_FILE = ROOT / "conversation.json"
+STATE_FILE = DATA_DIR / "conversation.json"
 WAKE_WORDS = ("salut hermy", "bonjour hermy", "hey hermy", "hermy")
 STOP_WORDS = {"stop", "stop hermy", "hermy stop"}
 HTTP = requests.Session()
@@ -953,7 +958,7 @@ def run_gui() -> None:
 
         def load_position(self) -> None:
             try:
-                data = json.loads((ROOT / "hermy_gui_position.json").read_text())
+                data = json.loads((DATA_DIR / "hermy_gui_position.json").read_text())
                 self.move(int(data["x"]), int(data["y"]))
             except (OSError, ValueError, KeyError, TypeError):
                 screen = QApplication.primaryScreen().availableGeometry()
@@ -962,7 +967,7 @@ def run_gui() -> None:
 
         def save_position(self) -> None:
             try:
-                (ROOT / "hermy_gui_position.json").write_text(
+                (DATA_DIR / "hermy_gui_position.json").write_text(
                     json.dumps({"x": self.x(), "y": self.y()}))
             except OSError:
                 pass
