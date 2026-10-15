@@ -1,7 +1,19 @@
-# Hermy Voice — macOS + Raspberry Pi 5
+# Hermy Voice
 
-Client vocal Python pour le profil Hermes Agent `hermy`. La détection des wake words et la transcription des commandes sont locales avec Faster-Whisper ; l’audio n’est pas envoyé. Le texte reconnu et l’identifiant de conversation sont envoyés à l’API Hermes en HTTPS.
 
+<img src="./docs/hermy.png" alt="Hermy Voice Logo" width="200" style="display:block; margin:auto;" />
+
+C'est un projet assistant vocal local pour macOS et Raspberry Pi. Il communique avec l'agent Hermes via l'API Hermes pour gérer les conversations, mais la détection des wake words et la transcription des commandes se font entièrement en local grâce à Faster-Whisper. l’audio n’est pas envoyé. Le texte reconnu et l’identifiant de conversation sont envoyés à l’API Hermes en HTTPS.
+
+ex: notre Client vocal Python utilisera le profil Hermes Agent `hermy`. 
+
+Nous avons deux plateformes cibles : macOS et Raspberry Pi. 
+
+Sur macOS, il peut fonctionner en deux modes : console ou interface graphique.
+Sur Raspberry Pi, il fonctionne uniquement en mode console.
+
+
+  
 ## Fonctionnement
 
 - En veille, Hermy se réveille avec **« Salut Hermy »**, **« Bonjour Hermy »**, **« Hey Hermy »** ou **« Hermy »**.
@@ -17,7 +29,7 @@ Client vocal Python pour le profil Hermes Agent `hermy`. La détection des wake 
 
 ## Installation — macOS Apple Silicon
 
-Python 3.11 ou 3.12 est recommandé. `PySide6` est installé uniquement sur macOS par le fichier de dépendances ; il n'est pas nécessaire sur Raspberry Pi.
+Python 3.14 est recommandé. `PySide6` est installé uniquement sur macOS par le fichier de dépendances ; il n'est pas nécessaire sur Raspberry Pi.
 
 ```bash
 python3 -m venv .venv
@@ -52,43 +64,55 @@ Copie `.env.example` vers `.env`, renseigne `API_SERVER_KEY`, puis ajuste les pa
 
 ### API Hermes
 
-| Variable | Description | Exemple |
-|---|---|---|
-| `HERMY_API_BASE` | URL de base de l’API Hermes. | `https://hermes-api.ualexon.dev/p/hermy/v1` |
-| `API_SERVER_KEY` | Clé privée du profil Hermes. Obligatoire. | `REMPLACE_PAR_TA_CLE` |
-| `HERMY_MODEL` | Nom du profil/modèle envoyé à l’API. | `hermy` |
-| `REQUEST_TIMEOUT` | Délai maximal d’attente de la réponse API, en secondes. | `180` |
+| Variable          | Description                                             | Exemple                                     |
+| ----------------- | ------------------------------------------------------- | ------------------------------------------- |
+| `HERMY_API_BASE`  | URL de base de l’API Hermes.                            | `https://hermes-api.ualexon.dev/p/hermy/v1` |
+| `API_SERVER_KEY`  | Clé privée du profil Hermes. Obligatoire.               | `REMPLACE_PAR_TA_CLE`                       |
+| `HERMY_MODEL`     | Nom du profil/modèle envoyé à l’API.                    | `hermy`                                     |
+| `REQUEST_TIMEOUT` | Délai maximal d’attente de la réponse API, en secondes. | `180`                                       |
+
+### Voix de Hermy sur macOS
+
+Hermy utilise la synthèse vocale intégrée à macOS (`say`) et conserve par défaut la voix système, comme avant. Pour installer ou essayer d'autres voix, ouvre **Réglages Système → Accessibilité → Contenu énoncé → Voix du système**, puis télécharge une voix française. Apple explique la sélection et le téléchargement des voix [dans son guide macOS](https://support.apple.com/en-me/guide/mac-help/mchlp2290/mac).
+
+Tu peux choisir une voix installée en renseignant `HERMY_TTS_VOICE` dans `.env`. Pour afficher les noms exacts disponibles sur ton Mac :
+
+```bash
+say -v '?'
+```
+
+Exemple : `HERMY_TTS_VOICE="Eddy (Français (France))"`. Laisse la valeur vide pour utiliser la voix système par défaut. Cette option ne change pas la voix utilisée sur Raspberry Pi.
 
 ### Whisper
 
-| Variable | Description | Exemple |
-|---|---|---|
-| `WHISPER_MODEL` | Modèle utilisé pour les wake words et les commandes (`tiny`, `base`, `small`, `medium`, `large-v3`). Les modèles plus grands sont généralement plus précis mais plus lents et gourmands en mémoire. | `medium` |
-| `STT_LANGUAGE` | Langue parlée ; laisse vide pour la détection automatique. | `fr` |
-| `STT_INITIAL_PROMPT` | Indice facultatif pour les noms propres ou termes récurrents. | vide |
-| `WHISPER_DEVICE` | Périphérique Faster-Whisper : `cpu` ou `cuda` si compatible. | `cpu` |
-| `WHISPER_COMPUTE_TYPE` | Type de calcul ; `int8` convient au CPU, `float16` aux GPU compatibles. | `int8` |
-| `WHISPER_CPU_THREADS` | Nombre de threads CPU utilisés par Whisper. | `6` |
-| `WAKE_BEAM_SIZE` | Nombre d’hypothèses pour les wake words ; `1` privilégie la vitesse. | `1` |
-| `COMMAND_BEAM_SIZE` | Nombre d’hypothèses pour les commandes ; une valeur plus élevée peut améliorer la reconnaissance au prix du délai. | `1` |
+| Variable               | Description                                                                                                                                                                                         | Exemple  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `WHISPER_MODEL`        | Modèle utilisé pour les wake words et les commandes (`tiny`, `base`, `small`, `medium`, `large-v3`). Les modèles plus grands sont généralement plus précis mais plus lents et gourmands en mémoire. | `medium` |
+| `STT_LANGUAGE`         | Langue parlée ; laisse vide pour la détection automatique.                                                                                                                                          | `fr`     |
+| `STT_INITIAL_PROMPT`   | Indice facultatif pour les noms propres ou termes récurrents.                                                                                                                                       | vide     |
+| `WHISPER_DEVICE`       | Périphérique Faster-Whisper : `cpu` ou `cuda` si compatible.                                                                                                                                        | `cpu`    |
+| `WHISPER_COMPUTE_TYPE` | Type de calcul ; `int8` convient au CPU, `float16` aux GPU compatibles.                                                                                                                             | `int8`   |
+| `WHISPER_CPU_THREADS`  | Nombre de threads CPU utilisés par Whisper.                                                                                                                                                         | `6`      |
+| `WAKE_BEAM_SIZE`       | Nombre d’hypothèses pour les wake words ; `1` privilégie la vitesse.                                                                                                                                | `1`      |
+| `COMMAND_BEAM_SIZE`    | Nombre d’hypothèses pour les commandes ; une valeur plus élevée peut améliorer la reconnaissance au prix du délai.                                                                                  | `1`      |
 
 ### Audio, veille et claquements
 
-| Variable | Description | Exemple |
-|---|---|---|
-| `SAMPLE_RATE` | Fréquence d’échantillonnage audio en hertz. | `16000` |
-| `ENERGY_THRESHOLD` | Niveau RMS minimal pour commencer à capturer une commande. Augmente-le si le bruit démarre l’enregistrement ; baisse-le si la voix n’est pas captée. | `0.012` |
-| `SILENCE_SECONDS` | Silence nécessaire pour considérer une phrase terminée. Une valeur basse réduit l’attente, mais peut couper les longues pauses dans une phrase. | `0.7` |
-| `COMMAND_TIMEOUT` | Délai pour commencer une commande après le réveil. | `30` |
-| `FOLLOWUP_TIMEOUT` | Délai pour une demande suivante après une réponse. | `30` |
-| `CLAP_MIN_RMS` | RMS minimal d’un impact candidat au claquement. Augmente-le pour rejeter les sons moins forts. | `0.04` |
-| `CLAP_MIN_PEAK` | Pic minimal d’un impact candidat. | `0.20` |
-| `CLAP_MIN_CREST` | Facteur de crête minimal, utilisé pour privilégier les sons brefs. | `5.0` |
-| `CLAP_MIN_INTERVAL` | Intervalle minimal entre deux claquements. | `0.22` |
-| `CLAP_PAIR_WINDOW` | Intervalle maximal accepté entre les deux claquements. | `0.85` |
-| `WAKE_WINDOW_SECONDS` | Durée maximale configurée d’un segment de parole en veille (minimum effectif : 4 secondes). | `2.4` |
-| `WAKE_CHECK_SECONDS` | Ancien réglage conservé pour compatibilité ; la veille actuelle est segmentée et ne l’utilise pas. | `0.8` |
-| `HERMY_DEBUG_AUDIO` | Affiche (`1`) ou masque (`0`) le niveau RMS du micro en veille. Le RMS mesure l’énergie sonore, pas la présence certaine d’une voix. | `1` |
+| Variable              | Description                                                                                                                                          | Exemple |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `SAMPLE_RATE`         | Fréquence d’échantillonnage audio en hertz.                                                                                                          | `16000` |
+| `ENERGY_THRESHOLD`    | Niveau RMS minimal pour commencer à capturer une commande. Augmente-le si le bruit démarre l’enregistrement ; baisse-le si la voix n’est pas captée. | `0.012` |
+| `SILENCE_SECONDS`     | Silence nécessaire pour considérer une phrase terminée. Une valeur basse réduit l’attente, mais peut couper les longues pauses dans une phrase.      | `0.7`   |
+| `COMMAND_TIMEOUT`     | Délai pour commencer une commande après le réveil.                                                                                                   | `30`    |
+| `FOLLOWUP_TIMEOUT`    | Délai pour une demande suivante après une réponse.                                                                                                   | `30`    |
+| `CLAP_MIN_RMS`        | RMS minimal d’un impact candidat au claquement. Augmente-le pour rejeter les sons moins forts.                                                       | `0.04`  |
+| `CLAP_MIN_PEAK`       | Pic minimal d’un impact candidat.                                                                                                                    | `0.20`  |
+| `CLAP_MIN_CREST`      | Facteur de crête minimal, utilisé pour privilégier les sons brefs.                                                                                   | `5.0`   |
+| `CLAP_MIN_INTERVAL`   | Intervalle minimal entre deux claquements.                                                                                                           | `0.22`  |
+| `CLAP_PAIR_WINDOW`    | Intervalle maximal accepté entre les deux claquements.                                                                                               | `0.85`  |
+| `WAKE_WINDOW_SECONDS` | Durée maximale configurée d’un segment de parole en veille (minimum effectif : 4 secondes).                                                          | `2.4`   |
+| `WAKE_CHECK_SECONDS`  | Ancien réglage conservé pour compatibilité ; la veille actuelle est segmentée et ne l’utilise pas.                                                   | `0.8`   |
+| `HERMY_DEBUG_AUDIO`   | Affiche (`1`) ou masque (`0`) le niveau RMS du micro en veille. Le RMS mesure l’énergie sonore, pas la présence certaine d’une voix.                 | `1`     |
 
 ## Lancement
 
