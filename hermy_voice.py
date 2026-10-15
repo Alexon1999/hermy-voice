@@ -553,7 +553,13 @@ def ask_hermy(text: str, conversation_id: str) -> str:
         f"{API_BASE}/responses",
         headers={"Authorization": f"Bearer {API_KEY}",
                  "Content-Type": "application/json"},
-        json={"model": MODEL, "input": text, "conversation": conversation_id},
+        json={"model": MODEL, "input": text, "conversation": conversation_id, "instructions": (
+            f"Tu es {MODEL}, l'assistant vocal personnel de l'utilisateur. "
+            "Réponds toujours en français, avec des phrases naturelles et concises, "
+            "adaptées à être lues à voix haute. Pour une tâche longue, ne prétends "
+            "pas qu'elle est lancée ou terminée si tu n'en as pas la confirmation. "
+            "Pose les questions nécessaires avant d'agir."
+        )},
         timeout=(10, REQUEST_TIMEOUT),
     )
     if response.status_code >= 400:
@@ -573,6 +579,7 @@ def ask_hermy(text: str, conversation_id: str) -> str:
             f"Erreur de l’API Hermes (HTTP {response.status_code}).")
     try:
         payload = response.json()
+        # print("payload", payload)
     except ValueError as exc:
         raise RuntimeError(
             "L’API Hermes a renvoyé une réponse illisible.") from exc
@@ -749,7 +756,8 @@ def main() -> None:
                             f"🎙️ Nouvelle conversation. Je t'écoute pendant {COMMAND_TIMEOUT:g} secondes…",
                         )
                         if not spoken:
-                            print("Aucune demande en 30 secondes : retour en veille.")
+                            print(
+                                "Aucune demande en 30 secondes : retour en veille.")
                             break
                         continue
                 print(f"\nToi : {spoken}")
