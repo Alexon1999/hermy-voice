@@ -17,7 +17,7 @@ Client vocal Python pour le profil Hermes Agent `hermy`. La détection des wake 
 
 ## Installation — macOS Apple Silicon
 
-Python 3.11 ou 3.12 est recommandé.
+Python 3.11 ou 3.12 est recommandé. `PySide6` est installé uniquement sur macOS par le fichier de dépendances ; il n'est pas nécessaire sur Raspberry Pi.
 
 ```bash
 python3 -m venv .venv
@@ -96,6 +96,14 @@ Copie `.env.example` vers `.env`, renseigne `API_SERVER_KEY`, puis ajuste les pa
 source .venv/bin/activate
 python hermy_voice.py
 ```
+
+Sur macOS, tu peux lancer la mascotte flottante avec :
+
+```bash
+python hermy_voice.py --gui
+```
+
+La fenêtre graphique utilise PySide6. Elle affiche une mascotte dessinée directement dans le programme sur un fond transparent, sans bulle de transcription des réponses. Le personnage s’anime en veille, pendant l’écoute et pendant la parole. Fais glisser le personnage pour le placer ; sa position est mémorisée. Survole-le pour afficher les commandes veille/réveil et quitter. Réveiller Hermy depuis la mascotte lance directement une fenêtre d’écoute de commande, sans wake word. Un clic droit ouvre aussi le menu. Le mode console reste le mode par défaut ; le mode graphique est réservé à macOS. Sur Raspberry Pi, continue à lancer `python hermy_voice.py` sans installer PySide6.
 
 Au premier lancement, Faster-Whisper télécharge le modèle configuré. Sur macOS, autorise le Terminal à utiliser le micro dans **Réglages Système → Confidentialité et sécurité → Microphone**. Sur Raspberry Pi, vérifie les périphériques avec :
 
