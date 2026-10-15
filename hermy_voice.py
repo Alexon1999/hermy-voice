@@ -2,9 +2,12 @@
 """Assistant vocal Hermy : wake words, écoute continue, conversation et veille."""
 from __future__ import annotations
 import json
+import argparse
+import math
 import os
 import platform
 import queue
+import signal
 import shutil
 import subprocess
 import sys
@@ -54,6 +57,42 @@ STATE_FILE = ROOT / "conversation.json"
 WAKE_WORDS = ("salut hermy", "bonjour hermy", "hey hermy", "hermy")
 STOP_WORDS = {"stop", "stop hermy", "hermy stop"}
 HTTP = requests.Session()
+
+# Le mode graphique est facultatif et ne charge Qt qu'avec --gui.
+GUI_MODE = False
+GUI_PAUSED = threading.Event()
+GUI_FORCE_LISTEN = threading.Event()
+SHUTDOWN_REQUESTED = threading.Event()
+GUI_EVENTS: queue.Queue[tuple[str, str]] = queue.Queue()
+ACTIVE_TTS_PROCESS: subprocess.Popen | None = None
+
+
+def gui_event(kind: str, text: str = "") -> None:
+    if GUI_MODE:
+        GUI_EVENTS.put((kind, text))
+
+
+def request_gui_shutdown() -> None:
+    global ACTIVE_TTS_PROCESS
+    if SHUTDOWN_REQUESTED.is_set():
+        return
+    SHUTDOWN_REQUESTED.set()
+    GUI_PAUSED.clear()
+    if ACTIVE_TTS_PROCESS is not None and ACTIVE_TTS_PROCESS.poll() is None:
+        ACTIVE_TTS_PROCESS.terminate()
+    if MICROPHONE is not None:
+        try:
+            MICROPHONE.close()
+        except Exception:
+            pass
+
+
+def wait_for_gui_resume() -> None:
+    """Point de synchronisation commun entre les commandes GUI et l'assistant."""
+    while GUI_MODE and GUI_PAUSED.is_set() and not SHUTDOWN_REQUESTED.is_set():
+        GUI_PAUSED.wait(0.1)
+    if GUI_MODE and SHUTDOWN_REQUESTED.is_set():
+        raise KeyboardInterrupt
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -140,28 +179,48 @@ def speak(
     """Lit la réponse sans surveiller le micro ni interrompre la synthèse."""
     if not text.strip():
         return False
+    wait_for_gui_resume()
     command = speech_command(text)
     if command is None:
         return False
     try:
-        subprocess.run(command, check=False)
+        gui_event("speaking", text)
+        if GUI_MODE:
+            global ACTIVE_TTS_PROCESS
+            process = subprocess.Popen(command)
+            ACTIVE_TTS_PROCESS = process
+            try:
+                while process.poll() is None:
+                    if SHUTDOWN_REQUESTED.wait(0.1):
+                        process.terminate()
+                        process.wait()
+                        raise KeyboardInterrupt
+            finally:
+                ACTIVE_TTS_PROCESS = None
+        else:
+            subprocess.run(command, check=False)
         return False
     except KeyboardInterrupt:
         raise
     except OSError as exc:
         print(f"(Synthèse vocale indisponible : {exc})")
         return False
+    finally:
+        gui_event("spoken", "")
 
 
 class ContinuousMicrophone:
     """Capture le micro avec un seul flux ouvert pendant toute l'exécution."""
 
-    def __init__(self) -> None:
+    def __init__(self, device: int | str | None = None) -> None:
         # File bornée : si Whisper/API prennent du temps, on conserve les blocs récents.
         self.blocks: queue.Queue[np.ndarray] = queue.Queue(maxsize=128)
         self.pending = np.array([], dtype=np.float32)
         self.pending_lock = threading.Lock()
+        self.last_callback_rms = 0.0
+        self.callback_blocks = 0
         self.stream = sd.InputStream(
+            device=device,
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
@@ -172,6 +231,9 @@ class ContinuousMicrophone:
         if status:
             print(f"(Audio : {status})", file=sys.stderr)
         block = indata[:, 0].copy()
+        self.callback_blocks += 1
+        if HERMY_DEBUG_AUDIO:
+            self.last_callback_rms = float(np.sqrt(np.mean(np.square(block))))
         try:
             self.blocks.put_nowait(block)
         except queue.Full:
@@ -253,6 +315,8 @@ MICROPHONE: ContinuousMicrophone | None = None
 def record_chunk(seconds: float) -> np.ndarray:
     if MICROPHONE is None:
         raise RuntimeError("le micro continu n'est pas initialisé")
+    # Attend la reprise sans injecter de faux blocs silencieux dans la détection.
+    wait_for_gui_resume()
     return MICROPHONE.read(seconds)
 
 
@@ -377,7 +441,9 @@ def clap_detected(audio: np.ndarray) -> bool:
     )
 
 
-def listen_for_wake(whisper: WhisperModel) -> None:
+def listen_for_wake(whisper: WhisperModel) -> bool:
+    """Retourne True si le bouton GUI a demandé une écoute directe."""
+    gui_event("status", "En veille — dis « Hermy »")
     print("\n💤 Veille — dis « Salut Hermy », « Bonjour Hermy », « Hey Hermy » ou « Hermy », ou claque deux fois des mains.")
     # Détecte chaque prise de parole une fois, puis la transcrit après une
     # courte pause. La fenêtre glissante précédente retraitait plusieurs fois
@@ -393,13 +459,30 @@ def listen_for_wake(whisper: WhisperModel) -> None:
     clap_armed = True
     threshold = max(0.010, ENERGY_THRESHOLD * 0.75)
     max_speech_seconds = max(4.0, WAKE_WINDOW_SECONDS)
+
+    def resume_directly(chunk: np.ndarray | None = None) -> bool:
+        if not GUI_MODE or not GUI_FORCE_LISTEN.is_set():
+            return False
+        GUI_FORCE_LISTEN.clear()
+        if chunk is not None and MICROPHONE is not None:
+            MICROPHONE.prepend_audio(chunk)
+        print("\n▶️ Veille désactivée : écoute directe depuis la mascotte.")
+        gui_event("status", "Je t’écoute…")
+        return True
+
     while True:
+        if resume_directly():
+            return True
         chunk = record_chunk(chunk_seconds)
+        if resume_directly(chunk):
+            return True
         rms = float(np.sqrt(np.mean(np.square(chunk)))) if chunk.size else 0.0
         rms_tick += 1
         if HERMY_DEBUG_AUDIO and rms_tick >= 5:
+            capture_rms = MICROPHONE.last_callback_rms if MICROPHONE is not None else 0.0
             print(
-                f"\r🔎 Micro actif — niveau audio RMS : {rms:.4f}   ", end="", flush=True)
+                f"\r🔎 RMS traité : {rms:.4f} | dernier bloc micro : {capture_rms:.4f}   ",
+                end="", flush=True)
             rms_tick = 0
         is_clap = clap_detected(chunk)
         now = time.monotonic()
@@ -411,7 +494,7 @@ def listen_for_wake(whisper: WhisperModel) -> None:
                     beep("ready")
                     if MICROPHONE is not None:
                         MICROPHONE.discard_buffer()
-                    return
+                    return False
             if last_clap_at is None or now - last_clap_at > CLAP_PAIR_WINDOW:
                 last_clap_at = now
             clap_armed = False
@@ -460,7 +543,7 @@ def listen_for_wake(whisper: WhisperModel) -> None:
             # une nouvelle commande. Le micro reste ouvert en continu.
             if MICROPHONE is not None:
                 MICROPHONE.discard_buffer()
-            return
+            return False
         chunks = []
         pre_roll.clear()
         speaking = False
@@ -469,6 +552,9 @@ def listen_for_wake(whisper: WhisperModel) -> None:
 
 
 def listen_for_speech(whisper: WhisperModel, timeout: float, prompt: str) -> str:
+    if GUI_MODE:
+        GUI_FORCE_LISTEN.clear()
+    gui_event("status", "Je t’écoute…")
     if prompt:
         print(prompt)
     chunks: list[np.ndarray] = []
@@ -481,6 +567,8 @@ def listen_for_speech(whisper: WhisperModel, timeout: float, prompt: str) -> str
     chunk_seconds = 0.2
     while elapsed < timeout:
         chunk = record_chunk(chunk_seconds)
+        if GUI_MODE and GUI_FORCE_LISTEN.is_set():
+            GUI_FORCE_LISTEN.clear()
         elapsed += chunk_seconds
         rms = float(np.sqrt(np.mean(np.square(chunk)))) if chunk.size else 0.0
         if not started:
@@ -548,6 +636,7 @@ def extract_response(payload: dict[str, Any]) -> str:
 
 
 def ask_hermy(text: str, conversation_id: str) -> str:
+    wait_for_gui_resume()
     started_at = time.perf_counter()
     response = HTTP.post(
         f"{API_BASE}/responses",
@@ -625,7 +714,7 @@ def ask_with_recovery(
             print(f"\nToi : {text}")
 
 
-def main() -> None:
+def run_assistant() -> None:
     if not API_KEY or API_KEY == "REMPLACE_PAR_TA_CLE":
         fail("renseigne API_SERVER_KEY dans le fichier .env.")
     if not API_BASE.startswith("https://"):
@@ -650,20 +739,28 @@ def main() -> None:
     global MICROPHONE
     try:
         try:
-            device = sd.query_devices(kind="input")
+            device_index = sd.default.device[0] if GUI_MODE else None
+            if isinstance(device_index, int) and device_index < 0:
+                device_index = None
+            device = sd.query_devices(device_index, "input") if device_index is not None else sd.query_devices(kind="input")
             print(
                 f"🎚️ Micro d'entrée sélectionné : {device.get('name', 'inconnu')} ({device.get('max_input_channels', '?')} canaux)")
         except Exception as exc:
+            device_index = None
             print(f"(Impossible d'identifier le micro : {exc})")
-        MICROPHONE = ContinuousMicrophone()
+        MICROPHONE = ContinuousMicrophone(device_index)
         MICROPHONE.start()
         print("🎙️ Micro ouvert en continu (Ctrl+C pour le fermer).")
         if HERMY_DEBUG_AUDIO:
             print("Mode diagnostic audio actif : RMS = énergie sonore (pas une preuve de parole) ; VAD + validation stricte filtrent les faux réveils.")
         while True:
-            listen_for_wake(whisper)
+            direct_listen = listen_for_wake(whisper)
             spoken = listen_for_speech(
-                whisper, COMMAND_TIMEOUT, "🎙️ Je t'écoute… parle après le bip.")
+                whisper,
+                COMMAND_TIMEOUT,
+                "🎙️ Je t'écoute… parle après le bip." if not direct_listen
+                else "🎙️ Écoute directe activée depuis la mascotte : je t'écoute…",
+            )
             if not spoken:
                 print("Aucune commande détectée : retour en veille.")
                 continue
@@ -688,12 +785,18 @@ def main() -> None:
                         print("Aucune demande en 30 secondes : retour en veille.")
                         continue
                     print(f"\nToi : {spoken}")
+            # La demande qui suit « nouvelle conversation » passe par un
+            # chemin d'écoute dédié : traite aussi « Stop » ici, avant l'API.
+            if normalize(spoken) in STOP_WORDS:
+                print("⏹️ Arrêt demandé : retour en veille.")
+                continue
             answer = local_ack_response(spoken)
             local_ack = answer is not None
             if answer is not None:
                 print("Réponse locale (sans appel API)…")
             else:
                 print("Hermy réfléchit…")
+                gui_event("thinking")
                 beep("thinking")
                 answer = ask_with_recovery(
                     spoken, conversation_id, whisper, stop_whisper)
@@ -767,6 +870,7 @@ def main() -> None:
                     print("Réponse locale (sans appel API)…")
                 else:
                     print("Hermy réfléchit…")
+                    gui_event("thinking")
                     beep("thinking")
                     answer = ask_with_recovery(
                         spoken, conversation_id, whisper, stop_whisper)
@@ -800,5 +904,355 @@ def main() -> None:
             MICROPHONE = None
 
 
+def run_gui() -> None:
+    """Fenêtre mascotte Qt, transparente et réservée à macOS."""
+    if platform.system() != "Darwin":
+        fail("--gui est disponible uniquement sur macOS.")
+    try:
+        from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
+        from PySide6.QtGui import QColor, QFont, QPainter, QPen, QIcon, QPixmap, QLinearGradient, QBrush, QPainterPath
+        from PySide6.QtWidgets import QApplication, QWidget, QMenu
+    except ImportError:
+        fail("PySide6 manque. Sur macOS, installe les dépendances avec : python -m pip install -r requirements.txt")
+
+    class Mascot(QWidget):
+        def __init__(self) -> None:
+            super().__init__(None, Qt.WindowType.FramelessWindowHint |
+                             Qt.WindowType.WindowStaysOnTopHint |
+                             Qt.WindowType.Tool)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            # Qt.Tool est un NSPanel sur macOS et se masque à la désactivation
+            # de l'application par défaut. Garde la mascotte visible hors focus.
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+            self.setMouseTracking(True)
+            self.setFixedSize(190, 220)
+            self.hover = False
+            self.drag_offset = None
+            self.speaking = False
+            self.mode = "sleep"
+            self.speech_text = ""
+            self.speech_started = 0.0
+            self.speech_duration = 1.0
+            self.mouth_open = 0.0
+            self.paused = False
+            self.blink = False
+            self.message = ""
+            self.message_until = 0.0
+            self.manual_status_until = 0.0
+            self.load_position()
+            self.show()
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self.animate)
+            self.timer.start(60)
+
+        def load_position(self) -> None:
+            try:
+                data = json.loads((ROOT / "hermy_gui_position.json").read_text())
+                self.move(int(data["x"]), int(data["y"]))
+            except (OSError, ValueError, KeyError, TypeError):
+                screen = QApplication.primaryScreen().availableGeometry()
+                self.move(screen.right() - self.width() - 40,
+                          screen.bottom() - self.height() - 60)
+
+        def save_position(self) -> None:
+            try:
+                (ROOT / "hermy_gui_position.json").write_text(
+                    json.dumps({"x": self.x(), "y": self.y()}))
+            except OSError:
+                pass
+
+        def animate(self) -> None:
+            now = time.monotonic()
+            self.blink = (now % 4.8) < 0.13
+            if self.mode == "speaking":
+                text = self.speech_text
+                progress = min(max(0.0, now - self.speech_started) / self.speech_duration, 0.999)
+                char_index = min(int(progress * max(1, len(text))), max(0, len(text) - 1))
+                char = text[char_index].lower() if text else "a"
+                shapes = {"a": 1.0, "à": 1.0, "â": 0.9, "o": 0.82, "ô": 0.82,
+                          "e": 0.52, "è": 0.66, "ê": 0.66, "i": 0.30, "î": 0.30,
+                          "u": 0.36, "û": 0.36, "y": 0.30, "œ": 0.7}
+                target = 0.0 if char in ",.;:!?…" else shapes.get(char, 0.08)
+                self.mouth_open += (target - self.mouth_open) * 0.38
+            else:
+                self.mouth_open *= 0.72
+            if self.message and not self.speaking and now > self.message_until:
+                self.message = ""
+            self.update()
+
+        def set_message(self, kind: str, text: str) -> None:
+            if kind == "speaking":
+                self.speaking = True
+                self.mode = "speaking"
+                self.speech_text = text
+                self.speech_started = time.monotonic()
+                self.speech_duration = max(1.0, len(text) * 0.058 + text.count(",") * 0.12 + text.count(".") * 0.2)
+                self.message = ""
+            elif kind == "spoken":
+                self.speaking = False
+                self.mode = "listening"
+                self.message = ""
+            elif kind == "status":
+                if self.paused or time.monotonic() < self.manual_status_until:
+                    return
+                self.mode = "sleep" if "veille" in text.lower() else "listening"
+                self.message = ""
+            elif kind == "thinking":
+                self.mode = "thinking"
+                self.message = ""
+            self.update()
+
+        @staticmethod
+        def inside_ellipse(x: float, y: float, rect: tuple[float, float, float, float]) -> bool:
+            left, top, width, height = rect
+            dx = (x - left - width / 2) / (width / 2)
+            dy = (y - top - height / 2) / (height / 2)
+            return dx * dx + dy * dy <= 1
+
+        def on_character(self, point) -> bool:
+            x, y = point.x(), point.y()
+            return any(self.inside_ellipse(x, y, r) for r in (
+                (45, 12, 43, 45), (101, 12, 43, 45), (32, 40, 126, 125),
+                (22, 115, 55, 72), (113, 115, 55, 72), (48, 151, 87, 63)))
+
+        def toggle_pause(self) -> None:
+            if SHUTDOWN_REQUESTED.is_set():
+                return
+            self.paused = not self.paused
+            if self.paused:
+                GUI_PAUSED.set()
+                self.mode = "sleep"
+                self.message = ""
+                print("\n⏸️ Veille activée depuis la mascotte.", flush=True)
+            else:
+                GUI_FORCE_LISTEN.set()
+                if MICROPHONE is not None:
+                    MICROPHONE.discard_buffer()
+                GUI_PAUSED.clear()
+                self.mode = "listening"
+                self.message = ""
+                print("\n▶️ Écoute reprise depuis la mascotte.", flush=True)
+            if self.paused and MICROPHONE is not None:
+                MICROPHONE.discard_buffer()
+            self.message_until = time.monotonic() + 3
+            self.manual_status_until = time.monotonic() + 2
+            self.update()
+
+        def quit_app(self) -> None:
+            request_gui_shutdown()
+
+        def mousePressEvent(self, event) -> None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                p = event.position()
+                if self.hover and self.inside_ellipse(p.x(), p.y(), (139, 70, 35, 35)):
+                    self.toggle_pause()
+                    return
+                if self.hover and self.inside_ellipse(p.x(), p.y(), (139, 112, 35, 35)):
+                    self.quit_app()
+                    return
+                if not self.on_character(p):
+                    return
+                self.drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+            elif event.button() == Qt.MouseButton.RightButton:
+                menu = QMenu()
+                menu.addAction("Reprendre" if self.paused else "Mettre en veille", self.toggle_pause)
+                menu.addSeparator()
+                menu.addAction("Quitter Hermy", self.quit_app)
+                menu.exec(event.globalPosition().toPoint())
+
+        def mouseMoveEvent(self, event) -> None:
+            point = event.position()
+            over_controls = (self.hover and (
+                self.inside_ellipse(point.x(), point.y(), (139, 70, 35, 35)) or
+                self.inside_ellipse(point.x(), point.y(), (139, 112, 35, 35))))
+            self.hover = self.on_character(point) or over_controls
+            if self.drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                self.move(event.globalPosition().toPoint() - self.drag_offset)
+            self.update()
+
+        def mouseReleaseEvent(self, event) -> None:
+            if self.drag_offset is not None:
+                self.drag_offset = None
+                self.save_position()
+
+        def leaveEvent(self, event) -> None:
+            self.hover = False
+            self.update()
+
+        def paintEvent(self, event) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            black, white = QColor("#24242b"), QColor("#fffaf1")
+            now = time.monotonic()
+            sleep_mode = self.mode == "sleep"
+            listen_mode = self.mode == "listening"
+            thinking_mode = self.mode == "thinking"
+            bob = math.sin(now * (1.1 if sleep_mode else 1.55 if thinking_mode else 2.1)) * (1.2 if sleep_mode else 1.3 if thinking_mode else 1.8)
+            ear_motion = math.sin(now * 5.5) * 1.3 if listen_mode else 0.0
+            p.save()
+            p.translate(0, bob)
+            # Personnage vectoriel : toutes les zones non dessinées restent transparentes.
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(black)
+            p.drawEllipse(QRectF(45, 12 - ear_motion, 43, 45))
+            p.drawEllipse(QRectF(101, 12 + ear_motion, 43, 45))
+            p.drawEllipse(QRectF(32, 40, 126, 125))
+            p.drawEllipse(QRectF(22, 115, 55, 72)); p.drawEllipse(QRectF(113, 115, 55, 72))
+            p.drawEllipse(QRectF(48, 151, 87, 63))
+            p.setBrush(white)
+            p.drawEllipse(QRectF(47, 35, 84, 83)); p.drawEllipse(QRectF(58, 150, 67, 52))
+            # Bras/pattes séparés sous le visage.
+            p.setBrush(black)
+            p.drawEllipse(QRectF(28, 119, 40, 54)); p.drawEllipse(QRectF(122, 119, 40, 54))
+            p.setBrush(QColor("#25242b"))
+            p.drawEllipse(QRectF(57, 59, 31, 39)); p.drawEllipse(QRectF(96, 59, 31, 39))
+            if sleep_mode or self.blink:
+                p.setPen(QPen(white, 2.5))
+                p.drawLine(66, 79, 79, 79); p.drawLine(105, 79, 118, 79)
+            else:
+                gaze = math.sin(now * 1.5) * 1.4 if listen_mode else 0.0
+                gaze_y = -2.0 if thinking_mode else 0.0
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(white)
+                p.drawEllipse(QRectF(67, 68, 13, 16)); p.drawEllipse(QRectF(106, 68, 13, 16))
+                p.setBrush(black)
+                p.drawEllipse(QRectF(71 + gaze, 72 + gaze_y, 5, 9)); p.drawEllipse(QRectF(110 + gaze, 72 + gaze_y, 5, 9))
+                p.setBrush(white)
+                p.drawEllipse(QRectF(72 + gaze, 73 + gaze_y, 2, 2)); p.drawEllipse(QRectF(111 + gaze, 73 + gaze_y, 2, 2))
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(black)
+            p.drawEllipse(QRectF(86, 89, 12, 8))
+            p.setPen(QPen(black, 2)); p.drawLine(92, 96, 92, 101)
+            if sleep_mode:
+                p.setPen(QPen(QColor("#5b4650"), 2)); p.drawArc(QRectF(88, 99, 9, 7), 200 * 16, 140 * 16)
+                rise = (now % 2.4) * 11
+                alpha = int(90 + 150 * abs(math.sin(now * math.pi / 2.4)))
+                p.setPen(QColor(70, 83, 125, alpha)); p.setFont(QFont("", 13, QFont.Weight.Bold))
+                p.drawText(137, int(43 - rise), "Zzz")
+            else:
+                mouth_height = 2.5 + self.mouth_open * 12 if self.mode == "speaking" else 3.0
+                mouth_width = 10 + self.mouth_open * 5 if self.mode == "speaking" else 8.0
+                p.setPen(QPen(QColor("#693f46"), 1))
+                p.setBrush(QColor("#30252a") if self.mouth_open > 0.3 else QColor("#d28b84"))
+                p.drawEllipse(QRectF(92 - mouth_width / 2, 103, mouth_width, mouth_height))
+                if self.mode == "speaking" and self.mouth_open > 0.58:
+                    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor("#df8f98"))
+                    p.drawEllipse(QRectF(89, 110, 6, 3))
+            if thinking_mode:
+                # Patte posée près du menton et points qui montent en cadence.
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(black)
+                p.drawEllipse(QRectF(111, 111, 20, 35))
+                p.drawEllipse(QRectF(108, 103, 23, 22))
+                p.setBrush(QColor("#fffaf1"))
+                p.drawEllipse(QRectF(112, 106, 4, 3)); p.drawEllipse(QRectF(119, 104, 4, 3))
+                phase = (now * 1.25) % 3.0
+                for i, (x, y) in enumerate(((142, 55), (150, 44), (158, 33))):
+                    strength = 0.35 + 0.65 * max(0.0, 1.0 - abs(phase - i) / 0.9)
+                    alpha = int(70 + strength * 150)
+                    p.setBrush(QColor(82, 91, 126, alpha))
+                    p.drawEllipse(QRectF(x, y - 2 * strength, 5 + strength, 5 + strength))
+            if listen_mode:
+                pulse = int(55 + 85 * (0.5 + 0.5 * math.sin(now * 3.2)))
+                p.setPen(QPen(QColor(92, 147, 170, pulse), 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawArc(QRectF(19, 69, 28, 38), 70 * 16, 220 * 16)
+                p.drawArc(QRectF(143, 69, 28, 38), 250 * 16, 220 * 16)
+            if self.hover:
+                p.setPen(QPen(QColor(30, 30, 35, 170), 1)); p.setBrush(QColor(255, 255, 255, 225))
+                p.drawEllipse(QRectF(139, 70, 35, 35)); p.drawEllipse(QRectF(139, 112, 35, 35))
+                p.setPen(QPen(black, 2))
+                if self.paused:
+                    p.setBrush(black); p.drawPolygon([QPoint(152, 80), QPoint(152, 95), QPoint(164, 87)])
+                else:
+                    p.drawLine(151, 80, 151, 95); p.drawLine(160, 80, 160, 95)
+                p.drawLine(151, 124, 162, 135); p.drawLine(162, 124, 151, 135)
+            p.restore()
+            p.end()
+
+    def create_app_icon():
+        """Icône panda dessinée en code, utilisée dans le Dock macOS."""
+        pixmap = QPixmap(128, 128)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        gradient = QLinearGradient(0, 0, 128, 128)
+        gradient.setColorAt(0, QColor("#8f7cff"))
+        gradient.setColorAt(1, QColor("#46c8bd"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRoundedRect(QRectF(4, 4, 120, 120), 29, 29)
+        dark = QColor("#24242b")
+        painter.setBrush(dark)
+        painter.drawEllipse(QRectF(23, 18, 38, 40))
+        painter.drawEllipse(QRectF(67, 18, 38, 40))
+        painter.setBrush(QColor("#fffaf1"))
+        painter.drawEllipse(QRectF(19, 31, 90, 83))
+        painter.setBrush(dark)
+        painter.drawEllipse(QRectF(31, 51, 31, 36))
+        painter.drawEllipse(QRectF(66, 51, 31, 36))
+        painter.setBrush(QColor("#fffaf1"))
+        painter.drawEllipse(QRectF(42, 61, 10, 13))
+        painter.drawEllipse(QRectF(77, 61, 10, 13))
+        painter.setBrush(dark)
+        painter.drawEllipse(QRectF(46, 65, 5, 7))
+        painter.drawEllipse(QRectF(81, 65, 5, 7))
+        painter.drawEllipse(QRectF(58, 82, 13, 9))
+        painter.setPen(QPen(dark, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        smile = QPainterPath()
+        smile.moveTo(64, 89)
+        smile.cubicTo(58, 100, 49, 98, 47, 94)
+        smile.moveTo(64, 89)
+        smile.cubicTo(70, 100, 79, 98, 81, 94)
+        painter.drawPath(smile)
+        painter.end()
+        return QIcon(pixmap)
+
+    app = QApplication(sys.argv[:1])
+    # macOS uses the Qt application name for the Dock tooltip when running
+    # this script directly through Python.
+    app.setApplicationName("Hermy")
+    app.setApplicationDisplayName("Hermy")
+    app_icon = create_app_icon()
+    app.setWindowIcon(app_icon)
+    app.setQuitOnLastWindowClosed(True)
+    widget = Mascot()
+    widget.setWindowIcon(app_icon)
+    if widget.windowHandle() is not None:
+        widget.windowHandle().setIcon(app_icon)
+    worker = threading.Thread(target=run_assistant, name="hermy-assistant", daemon=True)
+
+    def handle_sigint(signum, frame) -> None:
+        request_gui_shutdown()
+
+    previous_sigint = signal.signal(signal.SIGINT, handle_sigint)
+
+    def poll_events() -> None:
+        if SHUTDOWN_REQUESTED.is_set():
+            app.quit()
+            return
+        while True:
+            try:
+                kind, text = GUI_EVENTS.get_nowait()
+            except queue.Empty:
+                break
+            widget.set_message(kind, text)
+    poller = QTimer()
+    poller.timeout.connect(poll_events)
+    poller.start(100)
+    worker.start()
+    app.exec()
+    request_gui_shutdown()
+    worker.join(timeout=0.5)
+    signal.signal(signal.SIGINT, previous_sigint)
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Assistant vocal Hermy")
+    parser.add_argument("--gui", action="store_true", help="Affiche la mascotte graphique (macOS uniquement)")
+    args = parser.parse_args()
+    GUI_MODE = args.gui
+    if GUI_MODE:
+        run_gui()
+    else:
+        run_assistant()
