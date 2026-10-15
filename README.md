@@ -1,17 +1,19 @@
 # Hermy Voice — macOS + Raspberry Pi 5
 
-Client vocal Python pour le profil Hermes Agent `hermy`, avec détection locale des wake words, écoute continue et retour automatique en veille.
+Client vocal Python pour le profil Hermes Agent `hermy`. La détection des wake words et la transcription des commandes sont locales avec Faster-Whisper ; l’audio n’est pas envoyé. Le texte reconnu et l’identifiant de conversation sont envoyés à l’API Hermes en HTTPS.
 
-## Comportement
+## Fonctionnement
 
-- En veille, Hermy écoute les mots : **« Salut Hermy »**, **« Bonjour Hermy »**, **« Hey Hermy »** et **« Hermy »**.
-- Un bip confirme le réveil. Hermy écoute ensuite la commande, jusqu'à 12 secondes par défaut.
-- Après une période de silence, l'audio est transcrit localement par Faster-Whisper et seul le texte est envoyé à l'API Hermes en HTTPS.
-- Un petit bip est joué pendant le traitement.
-- Après la réponse vocale, Hermy attend jusqu'à 8 secondes une demande suivante sans exiger de nouveau wake word. S'il n'entend rien, il retourne en veille.
-- `conversation.json` conserve l'identifiant de conversation. Dire « nouvelle conversation » démarre un nouveau fil local.
+- En veille, Hermy se réveille avec **« Salut Hermy »**, **« Bonjour Hermy »**, **« Hey Hermy »** ou **« Hermy »**.
+- Il accepte aussi un **double claquement de mains** : deux claquements nets séparés de 0,22 à 0,85 seconde. Un claquement isolé ne suffit pas. Les seuils sont réglables dans `.env` (voir ci-dessous) ; le clavier et les coups sur une table peuvent encore provoquer des faux réveils selon le micro et la pièce.
+- Après le réveil, tu as jusqu’à 30 secondes pour commencer une commande. Une pause de 0,7 seconde termine normalement la phrase et déclenche sa transcription locale.
+- Après la réponse, Hermy reste disponible 30 secondes pour une demande de suivi sans nouveau wake word, puis retourne en veille.
+- Dire **« nouvelle conversation »** crée un nouvel identifiant et ouvre une seule fenêtre d’écoute de 30 secondes pour la première demande. Les bruits que Whisper ne transcrit pas ne redémarrent pas le délai. Sans demande reconnue à l’expiration, Hermy retourne en veille.
+- Les remerciements seuls pris en charge (par exemple « merci », « merci beaucoup » ou « d’accord, merci ») reçoivent une réponse locale « Avec plaisir ! », sans appel API, puis Hermy retourne en veille.
+- Dire **« Stop »** pendant une période d’écoute met fin au tour et retourne en veille. Hermy ne surveille pas le micro pendant sa synthèse et termine sa réponse avant de reprendre l’écoute.
+- La console affiche séparément le temps de transcription Whisper et le temps de réponse de l’API. Cela aide à distinguer le délai local du délai du modèle distant ou d’une recherche web.
 
-> **Limite à connaître :** les wake words sont détectés par transcription locale Whisper, pas par un moteur spécialisé de détection de mot-clé. Sur un Raspberry Pi, cela consomme plus de CPU et la reconnaissance de « Hermy » peut varier selon le micro, le bruit et le modèle. Le modèle `base` est un bon point de départ ; ajustez `ENERGY_THRESHOLD` si le micro ne détecte pas la voix.
+> Les seuils de claquement sont acoustiques et dépendent du micro, du volume et de la pièce. Si le clavier ou la table réveille encore Hermy, augmente `CLAP_MIN_RMS`, `CLAP_MIN_PEAK` et `CLAP_MIN_CREST`. Si deux claquements ne sont pas détectés, baisse-les légèrement. Les wake words restent détectés par transcription locale Whisper, pas par un moteur spécialisé de mot-clé.
 
 ## Installation — macOS Apple Silicon
 
@@ -42,52 +44,51 @@ chmod 600 .env
 nano .env
 ```
 
-Si l'installation de `faster-whisper` échoue avec une version de Python trop récente, utilise Python 3.11 ou 3.12 dans un environnement virtuel.
+Si l’installation de `faster-whisper` échoue avec une version de Python trop récente, utilise Python 3.11 ou 3.12 dans un environnement virtuel.
 
-## Configuration — fichier `.env`
+## Configuration
 
-Copie `.env.example` vers `.env`, puis renseigne tes paramètres :
+Copie `.env.example` vers `.env`, renseigne `API_SERVER_KEY`, puis ajuste les paramètres au besoin. Ne publie pas `.env` et ne l’ajoute pas à Git : il contient la clé privée de l’API.
 
-```bash
-cp .env.example .env
-chmod 600 .env
-nano .env
-```
+### API Hermes
 
-Le fichier `.env` contient tes réglages locaux et ta clé API. Il ne doit pas être publié, envoyé dans un chat ni ajouté à un dépôt Git. L’archive ne contient aucune clé personnelle.
-
-### Paramètres API
-
-| Variable | À quoi ça sert | Valeur par défaut / exemple |
+| Variable | Description | Exemple |
 |---|---|---|
-| `HERMY_API_BASE` | URL HTTPS de base de l’API Hermes Agent. | `https://hermes-api.ualexon.dev/p/hermy/v1` |
-| `API_SERVER_KEY` | Clé privée `API_SERVER_KEY` du profil `hermy` sur le VPS. Obligatoire. | `REMPLACE_PAR_TA_CLE` à remplacer |
+| `HERMY_API_BASE` | URL de base de l’API Hermes. | `https://hermes-api.ualexon.dev/p/hermy/v1` |
+| `API_SERVER_KEY` | Clé privée du profil Hermes. Obligatoire. | `REMPLACE_PAR_TA_CLE` |
 | `HERMY_MODEL` | Nom du profil/modèle envoyé à l’API. | `hermy` |
-| `REQUEST_TIMEOUT` | Nombre maximal de secondes pendant lesquelles le client attend la réponse de l’API avant expiration. | `180` |
+| `REQUEST_TIMEOUT` | Délai maximal d’attente de la réponse API, en secondes. | `180` |
 
-### Reconnaissance vocale locale
+### Whisper
 
-| Variable | À quoi ça sert | Valeur par défaut / exemple |
+| Variable | Description | Exemple |
 |---|---|---|
-| `WHISPER_MODEL` | Modèle Faster-Whisper utilisé pour reconnaître les wake words et transcrire la commande. `tiny` est plus léger ; `small` est généralement plus précis que `base`, au prix d’une consommation CPU et d’un délai plus élevés. | `base` |
-| `STT_LANGUAGE` | Langue de transcription : `fr` pour le français, `en` pour l’anglais, etc. Une valeur vide permet la détection automatique. | `fr` |
-| `STT_INITIAL_PROMPT` | Indice facultatif pour les commandes (noms propres ou termes récurrents). Laisser vide si inutile ; ne pas y mettre une phrase entière. | vide |
-| `SAMPLE_RATE` | Fréquence d’échantillonnage audio, en hertz. | `16000` |
+| `WHISPER_MODEL` | Modèle utilisé pour les wake words et les commandes (`tiny`, `base`, `small`, `medium`, `large-v3`). Les modèles plus grands sont généralement plus précis mais plus lents et gourmands en mémoire. | `medium` |
+| `STT_LANGUAGE` | Langue parlée ; laisse vide pour la détection automatique. | `fr` |
+| `STT_INITIAL_PROMPT` | Indice facultatif pour les noms propres ou termes récurrents. | vide |
+| `WHISPER_DEVICE` | Périphérique Faster-Whisper : `cpu` ou `cuda` si compatible. | `cpu` |
+| `WHISPER_COMPUTE_TYPE` | Type de calcul ; `int8` convient au CPU, `float16` aux GPU compatibles. | `int8` |
+| `WHISPER_CPU_THREADS` | Nombre de threads CPU utilisés par Whisper. | `6` |
+| `WAKE_BEAM_SIZE` | Nombre d’hypothèses pour les wake words ; `1` privilégie la vitesse. | `1` |
+| `COMMAND_BEAM_SIZE` | Nombre d’hypothèses pour les commandes ; une valeur plus élevée peut améliorer la reconnaissance au prix du délai. | `1` |
 
-### Écoute, silence et veille
+### Audio, veille et claquements
 
-| Variable | À quoi ça sert | Valeur par défaut / exemple |
+| Variable | Description | Exemple |
 |---|---|---|
-| `WAKE_CHECK_SECONDS` | Intervalle, en secondes, entre les analyses audio pendant la veille. Un intervalle plus court peut rendre la détection plus réactive, au prix de davantage de traitement. | `1.2` |
-| `WAKE_WINDOW_SECONDS` | Durée de la fenêtre audio examinée pour reconnaître un wake word. Une fenêtre trop courte peut couper la phrase ; une fenêtre plus longue peut augmenter le délai de détection. | `3.2` |
-| `COMMAND_TIMEOUT` | Durée maximale d’écoute de la commande après le bip de réveil. | `12` |
-| `SILENCE_SECONDS` | Durée de silence consécutif qui indique que tu as terminé de parler et déclenche la transcription. | `1.3` |
-| `FOLLOWUP_TIMEOUT` | Temps laissé après une réponse pour prononcer une nouvelle demande sans redire le wake word. Sans parole détectée, Hermy retourne en veille. | `8` |
-| `ENERGY_THRESHOLD` | Seuil d’énergie sonore qui évite de traiter les blocs presque silencieux. Ce seuil ne distingue pas à lui seul la voix du clavier : le VAD et la validation de transcription font ce filtrage ensuite. | `0.012` |
-
-Les quatre wake words sont définis dans le code : « Salut Hermy », « Bonjour Hermy », « Hey Hermy » et « Hermy ». Ils ne sont pas configurables via `.env` dans cette version.
-
-**Filtrage anti-faux réveil :** Faster-Whisper applique maintenant un VAD avant la transcription, sans lui suggérer les mots de réveil ; Hermy n’accepte que les quatre formulations exactes et rejette les transcriptions répétées. Cela réduit les faux positifs, sans pouvoir garantir zéro erreur dans tous les environnements. Pour améliorer la précision des commandes, définis `WHISPER_MODEL=small` dans `.env` (le premier lancement téléchargera ce modèle). La capture conserve maintenant 400 ms avant le début détecté et le VAD des commandes est moins agressif pour éviter de couper les syllabes faibles. Tu peux définir `STT_INITIAL_PROMPT` avec quelques noms propres/termes récurrents, mais un prompt trop long peut biaiser la reconnaissance. Si Hermy coupe ta phrase trop tôt, augmente `SILENCE_SECONDS` ; si le réveil ne reconnaît pas le mot-clé, essaie une valeur plus grande pour `WAKE_WINDOW_SECONDS` ou un modèle Whisper plus précis. Sur Raspberry Pi 5, les modèles plus grands peuvent ralentir la reconnaissance.
+| `SAMPLE_RATE` | Fréquence d’échantillonnage audio en hertz. | `16000` |
+| `ENERGY_THRESHOLD` | Niveau RMS minimal pour commencer à capturer une commande. Augmente-le si le bruit démarre l’enregistrement ; baisse-le si la voix n’est pas captée. | `0.012` |
+| `SILENCE_SECONDS` | Silence nécessaire pour considérer une phrase terminée. Une valeur basse réduit l’attente, mais peut couper les longues pauses dans une phrase. | `0.7` |
+| `COMMAND_TIMEOUT` | Délai pour commencer une commande après le réveil. | `30` |
+| `FOLLOWUP_TIMEOUT` | Délai pour une demande suivante après une réponse. | `30` |
+| `CLAP_MIN_RMS` | RMS minimal d’un impact candidat au claquement. Augmente-le pour rejeter les sons moins forts. | `0.04` |
+| `CLAP_MIN_PEAK` | Pic minimal d’un impact candidat. | `0.20` |
+| `CLAP_MIN_CREST` | Facteur de crête minimal, utilisé pour privilégier les sons brefs. | `5.0` |
+| `CLAP_MIN_INTERVAL` | Intervalle minimal entre deux claquements. | `0.22` |
+| `CLAP_PAIR_WINDOW` | Intervalle maximal accepté entre les deux claquements. | `0.85` |
+| `WAKE_WINDOW_SECONDS` | Durée maximale configurée d’un segment de parole en veille (minimum effectif : 4 secondes). | `2.4` |
+| `WAKE_CHECK_SECONDS` | Ancien réglage conservé pour compatibilité ; la veille actuelle est segmentée et ne l’utilise pas. | `0.8` |
+| `HERMY_DEBUG_AUDIO` | Affiche (`1`) ou masque (`0`) le niveau RMS du micro en veille. Le RMS mesure l’énergie sonore, pas la présence certaine d’une voix. | `1` |
 
 ## Lancement
 
@@ -96,28 +97,19 @@ source .venv/bin/activate
 python hermy_voice.py
 ```
 
-Au premier lancement, Faster-Whisper télécharge le modèle configuré. macOS : autorise le Terminal à utiliser le micro dans Réglages Système → Confidentialité et sécurité → Microphone. Raspberry Pi : vérifie les périphériques audio avec `python -c "import sounddevice as sd; print(sd.query_devices())"`.
+Au premier lancement, Faster-Whisper télécharge le modèle configuré. Sur macOS, autorise le Terminal à utiliser le micro dans **Réglages Système → Confidentialité et sécurité → Microphone**. Sur Raspberry Pi, vérifie les périphériques avec :
 
-## Réglages utiles
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
 
-- `FOLLOWUP_TIMEOUT=8` : temps laissé pour enchaîner après une réponse.
-- `COMMAND_TIMEOUT=12` : délai maximal d'attente de la commande après le réveil.
-- `SILENCE_SECONDS=1.3` : silence qui termine une phrase.
-- `ENERGY_THRESHOLD=0.012` : seuil de détection de voix ; baisser légèrement si Hermy ne détecte pas une voix normale, augmenter si le bruit ambiant déclenche l'écoute.
-- `WAKE_WINDOW_SECONDS=3.2` : fenêtre audio analysée pour reconnaître le wake word.
+`Ctrl+C` arrête Hermy et ferme le micro. Le micro reste ouvert en continu pendant l’exécution ; sur macOS, son voyant reste allumé.
 
-`Ctrl+C` arrête Hermy.
+## Diagnostic
 
-## Microphone continu
-
-Le micro reste ouvert avec un flux audio unique pendant toute l’exécution, y compris en veille. Sur macOS, son voyant reste allumé tant que Hermy Voice tourne. `Ctrl+C` ferme le flux.
-
-
-## Diagnostic si Hermy ne réagit pas au mot de réveil
-
-Par défaut, `HERMY_DEBUG_AUDIO=1` affiche le nom du périphérique d'entrée, le niveau RMS capté et les textes reconnus par Whisper pendant la veille.
-
-- Si le niveau RMS reste proche de `0.0000` même quand tu parles, macOS utilise probablement la mauvaise entrée ou n'envoie pas de signal au programme. Vérifie **Réglages Système → Son → Entrée** et **Réglages Système → Confidentialité et sécurité → Microphone**.
-- Si le niveau RMS varie quand tu parles mais qu'aucune ligne `Whisper entend` n'apparaît, essaie `WHISPER_MODEL=small` ou vérifie la langue avec `STT_LANGUAGE=fr`.
-- Si Whisper affiche tes mots mais pas `Wake word détecté`, copie la transcription affichée : le mot « Hermy » a peut-être été transcrit différemment.
-- Une fois le problème résolu, tu peux désactiver ces messages avec `HERMY_DEBUG_AUDIO=0`.
+- Si le RMS reste proche de `0.0000` quand tu parles, vérifie l’entrée choisie dans **Réglages Système → Son → Entrée** et les permissions micro.
+- Si les wake words ne sont pas reconnus, vérifie `STT_LANGUAGE=fr`, essaie un modèle Whisper plus précis et parle distinctement.
+- Si les coups sur la table ou le clavier déclenchent Hermy, augmente les trois seuils `CLAP_MIN_*` ; garde deux claquements séparés dans la fenêtre configurée.
+- Si Hermy ne détecte pas tes claquements, baisse légèrement ces seuils et rapproche-toi du micro.
+- Si une phrase se coupe pendant une pause, augmente `SILENCE_SECONDS`.
+- Compare `⏱️ Whisper` et `⏱️ API` dans la console pour savoir si la transcription locale ou le service distant est la principale source de latence.
