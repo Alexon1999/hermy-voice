@@ -3,3 +3,4 @@
 __pycache__/
 *.py[cod]
 conversation.json
+hermy_gui_position.json
