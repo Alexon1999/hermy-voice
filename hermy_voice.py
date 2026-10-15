@@ -34,6 +34,7 @@ MODEL = os.getenv("HERMY_MODEL", "hermy")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 LANGUAGE = os.getenv("STT_LANGUAGE", "fr").strip() or None
 STT_INITIAL_PROMPT = os.getenv("STT_INITIAL_PROMPT", "").strip()
+HERMY_TTS_VOICE = os.getenv("HERMY_TTS_VOICE", "").strip()
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
 WAKE_CHECK_SECONDS = float(os.getenv("WAKE_CHECK_SECONDS", "0.8"))
@@ -160,7 +161,11 @@ def beep(kind: str = "ready") -> None:
 def speech_command(text: str) -> list[str] | None:
     system = platform.system().lower()
     if system == "darwin" and shutil.which("say"):
-        return ["say", text]
+        command = ["say"]
+        if HERMY_TTS_VOICE:
+            command.extend(["-v", HERMY_TTS_VOICE])
+        command.append(text)
+        return command
     if shutil.which("espeak-ng"):
         return ["espeak-ng", "-v", "fr", text]
     if shutil.which("espeak"):
