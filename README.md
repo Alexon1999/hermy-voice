@@ -137,6 +137,134 @@ python -c "import sounddevice as sd; print(sd.query_devices())"
 
 `Ctrl+C` arrête Hermy et ferme le micro. Le micro reste ouvert en continu pendant l’exécution ; sur macOS, son voyant reste allumé.
 
+
+## Exécution en arrière-plan au démarrage de macOS
+
+Pour lancer Hermy automatiquement à chaque ouverture de session, macOS utilise un **LaunchAgent**. Il exécute directement le Python de l’environnement virtuel du projet, sans créer ni installer une application bundle.
+
+Le lanceur `run_hermy_background.py` démarre Hermy et écrit sa sortie dans `hermy-launchd.log`. Ajoute `--gui` à sa commande pour activer le mode graphique (macOS). La rotation conserve au maximum quatre fichiers : le journal courant plafonne à 5 Mio et trois anciens journaux sont gardés (`hermy-launchd.log.1`, `.2`, `.3`).
+
+Créer le fichier `~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist` avec le contenu suivant, en remplaçant `/Users/alexon` par le chemin de ton dossier utilisateur si nécessaire :
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ualexon.hermy-voice</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/alexon/dev/projects/hermy-voice/.venv/bin/python</string>
+    <string>/Users/alexon/dev/projects/hermy-voice/run_hermy_background.py</string>
+    <string>--gui</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/alexon/dev/projects/hermy-voice</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
+```
+
+`ProgramArguments` lance le wrapper Python avec l’environnement virtuel du projet. Celui-ci démarre `hermy_voice.py --gui`, récupère ses sorties et erreurs, et applique la rotation du journal. `WorkingDirectory` permet au programme de retrouver les fichiers du projet et son `.env`. `RunAtLoad` le lance au chargement de la session. `KeepAlive` reste désactivé afin que quitter Hermy ferme réellement la mascotte au lieu de la faire réapparaître automatiquement. Pour la rouvrir avant la prochaine session, lance **Hermy** depuis Applications ; au prochain démarrage de session, `RunAtLoad` le lancera à nouveau.
+
+Tu peux aussi relancer Hermy depuis **Applications** sans saisir de commande. Le petit lanceur `Hermy.app` appelle `launchctl` pour démarrer l’agent déjà chargé ; Hermy continue de tourner avec le Python de `.venv`. Pour (re)créer le lanceur sur ce Mac, compile le script AppleScript fourni :
+
+```bash
+osacompile -o /Applications/Hermy.app launch_hermy.applescript
+```
+
+Après avoir créé le fichier, valider sa syntaxe et charger l’agent dans la session actuelle :
+
+```bash
+plutil -lint ~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist
+```
+
+Commandes de gestion :
+
+```bash
+# Vérifier l’état et la commande chargée
+launchctl print gui/$(id -u)/dev.ualexon.hermy-voice
+
+# Redémarrer Hermy après une modification
+launchctl kickstart -k gui/$(id -u)/dev.ualexon.hermy-voice
+
+# Arrêter et désactiver le lancement automatique
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist
+```
+
+Pour le relancer ensuite, exécuter de nouveau `launchctl bootstrap` avec le chemin du fichier plist. La permission d’accès au microphone doit être accordée à l’exécutable Python utilisé par l’environnement virtuel dans **Réglages Système → Confidentialité et sécurité → Microphone**. Consulte `hermy-launchd.log` pour diagnostiquer un problème de démarrage.
+
+
+### Exécution en arrière-plan au démarrage de Raspberry Pi
+
+Sur Raspberry Pi OS, utilise un service utilisateur **systemd**. Le lanceur Python démarre Hermy en mode console et applique la même rotation : 5 Mio maximum pour `hermy-launchd.log`, avec trois archives (`.1`, `.2`, `.3`). Vérifie d’abord que l’installation décrite plus haut est terminée et que le projet est dans `/home/pi/hermy-voice` ; adapte ce chemin si ton nom d’utilisateur ou l’emplacement du dépôt diffère.
+
+Créer le service utilisateur :
+
+```bash
+mkdir -p ~/.config/systemd/user
+nano ~/.config/systemd/user/hermy-voice.service
+```
+
+Y mettre le contenu suivant, en adaptant `/home/pi` au besoin :
+
+```ini
+[Unit]
+Description=Hermy Voice assistant
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/hermy-voice
+ExecStart=/home/pi/hermy-voice/.venv/bin/python /home/pi/hermy-voice/run_hermy_background.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Activer et démarrer le service :
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hermy-voice.service
+```
+
+Commandes utiles :
+
+```bash
+# Vérifier l’état
+systemctl --user status hermy-voice.service
+
+# Redémarrer après une modification
+systemctl --user restart hermy-voice.service
+
+# Arrêter temporairement
+systemctl --user stop hermy-voice.service
+
+# Désactiver le lancement automatique
+systemctl --user disable --now hermy-voice.service
+
+# Consulter le journal avec rotation
+ tail -n 100 ~/hermy-voice/hermy-launchd.log
+ls -lh ~/hermy-voice/hermy-launchd.log*
+```
+
+Par défaut, un service utilisateur démarre à l’ouverture de session. Pour le lancer au démarrage du Raspberry Pi même sans ouverture de session, active le *lingering* pour ton utilisateur :
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Le service tourne sous ton compte utilisateur afin d’accéder à ses fichiers `.env`, son environnement virtuel et son micro. Si l’accès audio est refusé, ajoute l’utilisateur aux groupes audio si nécessaire, puis reconnecte-toi : `sudo usermod -aG audio "$USER"`.
+
+
 ## Diagnostic
 
 - Si le RMS reste proche de `0.0000` quand tu parles, vérifie l’entrée choisie dans **Réglages Système → Son → Entrée** et les permissions micro.
