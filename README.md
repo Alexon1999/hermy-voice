@@ -138,67 +138,19 @@ python -c "import sounddevice as sd; print(sd.query_devices())"
 `Ctrl+C` arrête Hermy et ferme le micro. Le micro reste ouvert en continu pendant l’exécution ; sur macOS, son voyant reste allumé.
 
 
-## Exécution en arrière-plan au démarrage de macOS
+## Lancer Hermy comme application macOS
 
-Pour lancer Hermy automatiquement à chaque ouverture de session, macOS utilise un **LaunchAgent**. Il exécute directement le Python de l’environnement virtuel du projet, sans créer ni installer une application bundle.
+Le script `build_hermy_app.sh` crée `Hermy.app` et l’installe dans `/Applications`. Il utilise le Python de l’environnement virtuel du projet et lance Hermy en mode graphique en arrière-plan. Il ne crée ni n’utilise de LaunchAgent : Hermy démarre lorsque tu ouvres l’application depuis **Applications**, et ne démarre pas automatiquement à l’ouverture de session.
 
-Le lanceur `run_hermy_background.py` démarre Hermy et écrit sa sortie dans `hermy-launchd.log`. Ajoute `--gui` à sa commande pour activer le mode graphique (macOS). La rotation conserve au maximum quatre fichiers : le journal courant plafonne à 5 Mio et trois anciens journaux sont gardés (`hermy-launchd.log.1`, `.2`, `.3`).
-
-Créer le fichier `~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist` avec le contenu suivant, en remplaçant `/Users/alexon` par le chemin de ton dossier utilisateur si nécessaire :
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>dev.ualexon.hermy-voice</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/alexon/dev/projects/hermy-voice/.venv/bin/python</string>
-    <string>/Users/alexon/dev/projects/hermy-voice/run_hermy_background.py</string>
-    <string>--gui</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>/Users/alexon/dev/projects/hermy-voice</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <false/>
-</dict>
-</plist>
-```
-
-`ProgramArguments` lance le wrapper Python avec l’environnement virtuel du projet. Celui-ci démarre `hermy_voice.py --gui`, récupère ses sorties et erreurs, et applique la rotation du journal. `WorkingDirectory` permet au programme de retrouver les fichiers du projet et son `.env`. `RunAtLoad` le lance au chargement de la session. `KeepAlive` reste désactivé afin que quitter Hermy ferme réellement la mascotte au lieu de la faire réapparaître automatiquement. Pour la rouvrir avant la prochaine session, lance **Hermy** depuis Applications ; au prochain démarrage de session, `RunAtLoad` le lancera à nouveau.
-
-Tu peux aussi relancer Hermy depuis **Applications** sans saisir de commande. Le petit lanceur `Hermy.app` appelle `launchctl` pour démarrer l’agent déjà chargé ; Hermy continue de tourner avec le Python de `.venv`. Pour (re)créer le lanceur sur ce Mac, compile le script AppleScript fourni :
+Depuis Terminal, exécute le script à la racine du projet :
 
 ```bash
-osacompile -o /Applications/Hermy.app launch_hermy.applescript
+./build_hermy_app.sh
 ```
 
-Après avoir créé le fichier, valider sa syntaxe et charger l’agent dans la session actuelle :
+Le script demande confirmation avant de remplacer une application `Hermy.app` existante. Si macOS demande une autorisation administrateur pour écrire dans `/Applications`, saisis ton mot de passe. Ouvre ensuite **Hermy** depuis le dossier **Applications**.
 
-```bash
-plutil -lint ~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist
-```
-
-Commandes de gestion :
-
-```bash
-# Vérifier l’état et la commande chargée
-launchctl print gui/$(id -u)/dev.ualexon.hermy-voice
-
-# Redémarrer Hermy après une modification
-launchctl kickstart -k gui/$(id -u)/dev.ualexon.hermy-voice
-
-# Arrêter et désactiver le lancement automatique
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.ualexon.hermy-voice.plist
-```
-
-Pour le relancer ensuite, exécuter de nouveau `launchctl bootstrap` avec le chemin du fichier plist. La permission d’accès au microphone doit être accordée à l’exécutable Python utilisé par l’environnement virtuel dans **Réglages Système → Confidentialité et sécurité → Microphone**. Consulte `hermy-launchd.log` pour diagnostiquer un problème de démarrage.
-
+Le lanceur `run_hermy_background.py` écrit les sorties dans `hermy-launchd.log`, avec une rotation qui conserve au maximum quatre fichiers : le journal courant plafonne à 5 Mio et trois anciens journaux sont gardés (`hermy-launchd.log.1`, `.2`, `.3`). Quitte Hermy depuis les commandes de la mascotte. Au premier lancement, autorise l’accès au microphone pour l’interpréteur Python de `.venv` dans **Réglages Système → Confidentialité et sécurité → Microphone**.
 
 ### Exécution en arrière-plan au démarrage de Raspberry Pi
 
