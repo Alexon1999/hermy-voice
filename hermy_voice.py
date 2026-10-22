@@ -809,6 +809,8 @@ def run_assistant() -> None:
                 continue
             print(f"\nHermy :\n{answer}\n")
             was_interrupted = speak(answer, whisper, stop_whisper)
+            if not was_interrupted:
+                beep("ready")
             # macOS « say » est audible pendant que le micro reste ouvert.
             # Vide les blocs accumulés pendant la réponse pour éviter que
             # Hermy ne prenne sa propre voix pour la prochaine commande.
@@ -883,6 +885,8 @@ def run_assistant() -> None:
                     break
                 print(f"\nHermy :\n{answer}\n")
                 was_interrupted = speak(answer, whisper, stop_whisper)
+                if not was_interrupted:
+                    beep("ready")
                 if MICROPHONE is not None and not was_interrupted:
                     MICROPHONE.discard_buffer()
                 if local_ack:
